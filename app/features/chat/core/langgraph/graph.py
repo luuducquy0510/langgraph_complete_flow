@@ -4,6 +4,7 @@ from typing import Any, AsyncGenerator, Dict, Literal, Optional
 from urllib.parse import quote_plus
 import logging
 from abc import abstractmethod
+from asyncio import ValueError
 
 from asgiref.sync import sync_to_async
 from langchain_core.messages import BaseMessage, ToolMessage, convert_to_openai_messages
@@ -11,20 +12,19 @@ from langfuse.langchain import CallbackHandler
 from langgraph.graph import END, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import StateSnapshot
-from openai import OpenAIError
 from psycopg_pool import AsyncConnectionPool
 
-from app.set_up.llm import llm
+from app.set_up.llm import LLMConfig
 from app.conf.app_config import Environment, settings
-from app.core.langgraph.tools import tools
-from app.core.prompts import SYSTEM_PROMPT
 from app.schemas import GraphState, Message
 from app.utils import dump_messages, prepare_messages
- 
+from app.features.chat.core.langgraph.tools import tools
+from app.features.chat.core.prompts import SYSTEM_PROMPT
 
+ 
 logger = logging.getLogger(__name__)
 
-class LangGraphAgent:
+class BaseLangGraphAgent:
     """Manages the LangGraph Agent/workflow and interactions with the LLM.
 
     This class handles the creation and management of the LangGraph workflow,
@@ -34,7 +34,7 @@ class LangGraphAgent:
     def __init__(self):
         """Initialize the LangGraph Agent with necessary components."""
         # Use environment-specific LLM model
-        self.llm = llm
+        self.llm = LLMConfig.get_llm(settings.LLM_PROVIDER)
         self.tools_by_name = {tool.name: tool for tool in tools}
         self._connection_pool: Optional[AsyncConnectionPool] = None
         self._graph: Optional[CompiledStateGraph] = None
@@ -61,43 +61,6 @@ class LangGraphAgent:
 
         return model_kwargs
 
-    # async def _get_connection_pool(self) -> AsyncConnectionPool:
-    #     """Get a PostgreSQL connection pool using environment-specific settings.
-
-    #     Returns:
-    #         AsyncConnectionPool: A connection pool for PostgreSQL database.
-    #     """
-    #     if self._connection_pool is None:
-    #         try:
-    #             # Configure pool size based on environment
-    #             max_size = settings.POSTGRES_POOL_SIZE
-
-    #             connection_url = (
-    #                 "postgresql://"
-    #                 f"{quote_plus(settings.POSTGRES_USER)}:{quote_plus(settings.POSTGRES_PASSWORD)}"
-    #                 f"@{settings.POSTGRES_HOST}:{settings.POSTGRES_PORT}/{settings.POSTGRES_DB}"
-    #             )
-
-    #             self._connection_pool = AsyncConnectionPool(
-    #                 connection_url,
-    #                 open=False,
-    #                 max_size=max_size,
-    #                 kwargs={
-    #                     "autocommit": True,
-    #                     "connect_timeout": 5,
-    #                     "prepare_threshold": None,
-    #                 },
-    #             )
-    #             await self._connection_pool.open()
-    #             logger.info("connection_pool_created", max_size=max_size, environment=settings.ENVIRONMENT.value)
-    #         except Exception as e:
-    #             logger.error("connection_pool_creation_failed", error=str(e), environment=settings.ENVIRONMENT.value)
-    #             # In production, we might want to degrade gracefully
-    #             if settings.ENVIRONMENT == Environment.PRODUCTION:
-    #                 logger.warning("continuing_without_connection_pool", environment=settings.ENVIRONMENT.value)
-    #                 return None
-    #             raise e
-    #     return self._connection_pool
 
     async def _chat(self, state: GraphState) -> dict:
         """Process the chat state and generate a response.
@@ -117,8 +80,7 @@ class LangGraphAgent:
 
         for attempt in range(max_retries):
             try:
-                with llm_inference_duration_seconds.labels(model=self.llm.model_name).time():
-                    generated_state = {"messages": [await self.llm.ainvoke(dump_messages(messages))]}
+                generated_state = {"messages": [await self.llm.ainvoke(dump_messages(messages))]}
                 logger.info(
                     "llm_response_generated",
                     session_id=state.session_id,
@@ -127,7 +89,7 @@ class LangGraphAgent:
                     environment=settings.ENVIRONMENT.value,
                 )
                 return generated_state
-            except OpenAIError as e:
+            except ValueError as e:
                 logger.error(
                     "llm_call_failed",
                     llm_calls_num=llm_calls_num,
@@ -140,11 +102,11 @@ class LangGraphAgent:
 
                 # In production, we might want to fall back to a more reliable model
                 if settings.ENVIRONMENT == Environment.PRODUCTION and attempt == max_retries - 2:
-                    fallback_model = "gpt-4o"
+                    fallback_model = "gemini-2.0-flash"
                     logger.warning(
                         "using_fallback_model", model=fallback_model, environment=settings.ENVIRONMENT.value
                     )
-                    self.llm.model_name = fallback_model
+                    self.llm = LLMConfig.get_llm(settings.LLM_PROVIDER)
 
                 continue
 
@@ -192,55 +154,7 @@ class LangGraphAgent:
 
     @abstractmethod
     async def create_graph(self) -> Optional[CompiledStateGraph]:
-        """Create and configure the LangGraph workflow.
-
-        Returns:
-            Optional[CompiledStateGraph]: The configured LangGraph instance or None if init fails
-        """
-        if self._graph is None:
-            try:
-                graph_builder = StateGraph(GraphState)
-                graph_builder.add_node("chat", self._chat)
-                graph_builder.add_node("tool_call", self._tool_call)
-                graph_builder.add_conditional_edges(
-                    "chat",
-                    self._should_continue,
-                    {"continue": "tool_call", "end": END},
-                )
-                graph_builder.add_edge("tool_call", "chat")
-                graph_builder.set_entry_point("chat")
-                graph_builder.set_finish_point("chat")
-
-                # Get connection pool (may be None in production if DB unavailable)
-                connection_pool = await self._get_connection_pool()
-                if connection_pool:
-                    checkpointer = AsyncPostgresSaver(connection_pool)
-                    await checkpointer.setup()
-                else:
-                    # In production, proceed without checkpointer if needed
-                    checkpointer = None
-                    if settings.ENVIRONMENT != Environment.PRODUCTION:
-                        raise Exception("Connection pool initialization failed")
-
-                self._graph = graph_builder.compile(
-                    checkpointer=checkpointer, name=f"{settings.PROJECT_NAME} Agent ({settings.ENVIRONMENT.value})"
-                )
-
-                logger.info(
-                    "graph_created",
-                    graph_name=f"{settings.PROJECT_NAME} Agent",
-                    environment=settings.ENVIRONMENT.value,
-                    has_checkpointer=checkpointer is not None,
-                )
-            except Exception as e:
-                logger.error("graph_creation_failed", error=str(e), environment=settings.ENVIRONMENT.value)
-                # In production, we don't want to crash the app
-                if settings.ENVIRONMENT == Environment.PRODUCTION:
-                    logger.warning("continuing_without_graph")
-                    return None
-                raise e
-
-        return self._graph
+        pass
 
     async def get_response(
         self,
@@ -343,29 +257,76 @@ class LangGraphAgent:
             if message["role"] in ["assistant", "user"] and message["content"]
         ]
 
-    async def clear_chat_history(self, session_id: str) -> None:
-        """Clear all chat history for a given thread ID.
 
-        Args:
-            session_id: The ID of the session to clear history for.
+class NoToolLanggraphAgent(BaseLangGraphAgent):
+    async def create_graph(self) -> Optional[CompiledStateGraph]:
 
-        Raises:
-            Exception: If there's an error clearing the chat history.
+        """Create and configure the LangGraph workflow.
+
+        Returns:
+            Optional[CompiledStateGraph]: The configured LangGraph instance or None if init fails
         """
-        try:
-            # Make sure the pool is initialized in the current event loop
-            conn_pool = await self._get_connection_pool()
+        if self._graph is None:
+            try:
+                graph_builder = StateGraph(GraphState)
+                graph_builder.add_node("chat", self._chat)
 
-            # Use a new connection for this specific operation
-            async with conn_pool.connection() as conn:
-                for table in settings.CHECKPOINT_TABLES:
-                    try:
-                        await conn.execute(f"DELETE FROM {table} WHERE thread_id = %s", (session_id,))
-                        logger.info(f"Cleared {table} for session {session_id}")
-                    except Exception as e:
-                        logger.error(f"Error clearing {table}", error=str(e))
-                        raise
+                graph_builder.add_edge("chat")
+                graph_builder.set_entry_point("chat")
+                graph_builder.set_finish_point("chat")
 
-        except Exception as e:
-            logger.error("Failed to clear chat history", error=str(e))
-            raise
+                self._graph = graph_builder.compile( name=f"{settings.PROJECT_NAME} Agent ({settings.ENVIRONMENT.value})")
+
+                logger.info(
+                    "graph_created",
+                    graph_name=f"{settings.PROJECT_NAME} Agent",
+                    environment=settings.ENVIRONMENT.value,
+               )
+            except Exception as e:
+                logger.error("graph_creation_failed", error=str(e), environment=settings.ENVIRONMENT.value)
+                # In production, we don't want to crash the app
+                if settings.ENVIRONMENT == Environment.PRODUCTION:
+                    logger.warning("continuing_without_graph")
+                    return None
+                raise e
+
+        return self._graph
+    
+    
+class WithToolLanggraphAgent(BaseLangGraphAgent):
+    async def create_graph(self) -> Optional[CompiledStateGraph]:
+        """Create and configure the LangGraph workflow.
+
+        Returns:
+            Optional[CompiledStateGraph]: The configured LangGraph instance or None if init fails
+        """
+        if self._graph is None:
+            try:
+                graph_builder = StateGraph(GraphState)
+                graph_builder.add_node("chat", self._chat)
+                graph_builder.add_node("tool_call", self._tool_call)
+                graph_builder.add_conditional_edges(
+                    "chat",
+                    self._should_continue,
+                    {"continue": "tool_call", "end": END},
+                )
+                graph_builder.add_edge("tool_call", "chat")
+                graph_builder.set_entry_point("chat")
+                graph_builder.set_finish_point("chat")
+
+                self._graph = graph_builder.compile(name=f"{settings.PROJECT_NAME} Agent ({settings.ENVIRONMENT.value})")
+
+                logger.info(
+                    "graph_created",
+                    graph_name=f"{settings.PROJECT_NAME} Agent",
+                    environment=settings.ENVIRONMENT.value,
+                )
+            except Exception as e:
+                logger.error("graph_creation_failed", error=str(e), environment=settings.ENVIRONMENT.value)
+                # In production, we don't want to crash the app
+                if settings.ENVIRONMENT == Environment.PRODUCTION:
+                    logger.warning("continuing_without_graph")
+                    return None
+                raise e
+
+        return self._graph

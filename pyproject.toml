@@ -19,6 +19,11 @@ psycopg-pool = "^3.2.7"
 langchain-tavily = "^0.2.12"
 jose = "^1.0.0"
 jwt = "^1.4.0"
+sqlalchemy = "^2.0.44"
+pymilvus = "^2.6.2"
+starlette = "^0.48.0"
+sqlmodel = "^0.0.27"
+fastapi = "^0.120.1"
 
 
 [build-system]

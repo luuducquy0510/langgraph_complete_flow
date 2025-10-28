@@ -44,5 +44,5 @@ class EmbederConfig:
             raise ValueError(f"Unsupported embedding provider: {provider}. Supported providers: google_genai.")
         
 
-llm = LLMConfig.get_llm(settings.LLM_PROVIDER)
+# llm = LLMConfig.get_llm(settings.LLM_PROVIDER)
 embeder = EmbederConfig.get_embeder(settings.EMBEDER_PROVIDER)
