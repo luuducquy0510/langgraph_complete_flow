@@ -24,6 +24,7 @@ from app.features.chat.core.prompts import SYSTEM_PROMPT
  
 logger = logging.getLogger(__name__)
 
+
 class BaseLangGraphAgent:
     """Manages the LangGraph Agent/workflow and interactions with the LLM.
 
@@ -106,7 +107,7 @@ class BaseLangGraphAgent:
                     logger.warning(
                         "using_fallback_model", model=fallback_model, environment=settings.ENVIRONMENT.value
                     )
-                    self.llm = LLMConfig.get_llm(settings.LLM_PROVIDER)
+                    self.llm = LLMConfig.get_llm(settings.FALLBACK_LLM_PROVIDER)
 
                 continue
 

@@ -51,9 +51,9 @@ class Settings(BaseSettings):
     LLM_MODEL: str = Field(alias="LLM_MODEL", default="gemini-2.0-flash")
     LLM_PROVIDER: str = Field(alias="LLM_PROVIDER", default="google_genai")
 
-    CALLBACK_LLM_KEY: str = Field(alias="GOOGLE_API_KEY", default="")
-    CALLBACK_LLM_MODEL: str = Field(alias="LLM_MODEL", default="gemini-2.0-flash")
-    CALLBACK_LLM_PROVIDER: str = Field(alias="LLM_PROVIDER", default="google_genai")
+    FALLBACK_LLM_KEY: str = Field(alias="GOOGLE_API_KEY", default="")
+    FALLBACK_LLM_MODEL: str = Field(alias="FALLBACK_LLM_MODEL", default="gemini-2.0-flash")
+    FALLBACK_LLM_PROVIDER: str = Field(alias="FALLBACK_LLM_PROVIDER", default="google_genai")
 
     EMBEDER_MODEL: str = Field(alias="EMBEDER_MODEL", default="models/gemini-embedding-001")
     EMBEDER_PROVIDER: str = Field(alias="EMBEDER_PROVIDER", default="google_genai")
