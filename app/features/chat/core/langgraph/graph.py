@@ -35,9 +35,9 @@ class BaseLangGraphAgent:
     def __init__(self):
         """Initialize the LangGraph Agent with necessary components."""
         # Use environment-specific LLM model
-        self.llm = LLMConfig.get_llm(settings.LLM_PROVIDER)
+        self.llm = LLMConfig.get_llm(settings.LLM_PROVIDER).bind_tools(tools)
         self.tools_by_name = {tool.name: tool for tool in tools}
-        self._connection_pool: Optional[AsyncConnectionPool] = None
+        self.vb : Optional[AsyncConnectionPool] = None
         self._graph: Optional[CompiledStateGraph] = None
 
         logger.info("llm_initialized", model=settings.LLM_MODEL, environment=settings.ENVIRONMENT.value)
@@ -125,7 +125,7 @@ class BaseLangGraphAgent:
         """
         outputs = []
         for tool_call in state.messages[-1].tool_calls:
-            tool_result = await self.tools_by_name[tool_call["name"]].ainvoke(tool_call["args"])
+            tool_result = await self.tools_by_name[tool_call["name"]].ainvoke(["args"])
             outputs.append(
                 ToolMessage(
                     content=tool_result,
